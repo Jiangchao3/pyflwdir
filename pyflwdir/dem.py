@@ -76,25 +76,27 @@ def fill_depressions(
     # initiate queue
     if idxs_pit is None:  # with edge cells
         queued = gis_utils.get_edge(~done, structure=struct)
-    else:  # with user difinfed outlet cells
+    else:  # with user defined outlet cells
         queued = np.array([bool(0) for s in range(elevtn.size)]).reshape((nrow, ncol))
         for idx in idxs_pit:
             queued.flat[idx] = True
-    q = [(elevtn[0, 0], np.uint32(0), np.uint32(0)) for _ in range(0)]
+    # queue contains (elevation, boundary, row, col)
+    # boundary is included to favor non-boundary cells over boundary cells with same elevation
+    q = [(elevtn[0, 0], np.uint8(1), np.uint32(0), np.uint32(0)) for _ in range(0)]
     heapq.heapify(q)
     for r, c in zip(*np.where(queued)):
-        heapq.heappush(q, (elevtn[r, c], np.uint32(r), np.uint32(c)))
+        heapq.heappush(q, (elevtn[r, c], np.uint8(1), np.uint32(r), np.uint32(c)))
     # restrict queue to global edge mimimum (single outlet)
     if outlets == "min":
         q = [heapq.heappop(q)]
         queued[:, :] = False
-        queued[q[0][1], q[0][2]] = True
+        queued[q[0][-2], q[0][-1]] = True
 
     # loop over cells and neighbors with ascending cell elevation.
     drs, dcs = np.where(struct)
     drs, dcs = drs - 1, dcs - 1
     while len(q) > 0:
-        z0, r0, c0 = heapq.heappop(q)
+        z0, _, r0, c0 = heapq.heappop(q)
         for dr, dc in zip(drs, dcs):
             r = r0 + dr
             c = c0 + dc
@@ -104,7 +106,7 @@ def fill_depressions(
             dz = z0 - z1  # local depression if dz > 0
             if max_depth >= 0:  # if positive max_depth: don't fill when dz > max_depth
                 if dz >= max_depth:
-                    heapq.heappush(q, (z1, np.uint32(r), np.uint32(c)))
+                    heapq.heappush(q, (z1, np.uint8(0), np.uint32(r), np.uint32(c)))
                     queued[r, c] = True
                     for dr, dc in zip(drs, dcs):  # (re)visit neighbors
                         done[r + dr, c + dc] = False
@@ -116,11 +118,10 @@ def fill_depressions(
                 delv[r, c] = dz
                 z1 += dz
             if ~queued[r, c]:  # add to queue
-                heapq.heappush(q, (z1, np.uint32(r), np.uint32(c)))
+                heapq.heappush(q, (z1, np.uint8(0), np.uint32(r), np.uint32(c)))
                 queued[r, c] = True
             done[r, c] = True
             d8[r, c] = core_d8._us[dr + 1, dc + 1]
-            # zds[r, c] = z0
     return elevtn + delv, d8
 
 
@@ -129,7 +130,7 @@ def adjust_elevation(idxs_ds, seq, elevtn, mv=_mv):
     """Given a flow direction map, remove pits in the elevation map.
     Algorithm based on Yamazaki et al. (2012)
 
-    Yamazaki, D., Baugh, C. A., Bates, P. D., Kanae, S., Alsdorf, D. E. and
+    .. ref: Yamazaki, D., Baugh, C. A., Bates, P. D., Kanae, S., Alsdorf, D. E. and
     Oki, T.: Adjustment of a spaceborne DEM for use in floodplain hydrodynamic
     modeling, J. Hydrol., 436-437, 81-91, doi:10.1016/j.jhydrol.2012.02.045,
     2012.
@@ -142,8 +143,7 @@ def adjust_elevation(idxs_ds, seq, elevtn, mv=_mv):
             idxs0 = core._trace(idx0, idxs_ds, mv=mv, mask=mask)[0]
             # fix elevation
             elevtn1 = _adjust_elevation(elevtn_out[idxs0])
-            # assert np.all(np.diff(elevtn1) <= 0)
-            # assert elevtn_out[idxs0][-1] == elevtn1[-1]
+            # assert np.all(np.diff(elevtn1) <= 0), elevtn_out[idxs0]
             elevtn_out[idxs0] = elevtn1
             mask[idxs0] = True  # update mask
     return elevtn_out
@@ -155,62 +155,55 @@ def _adjust_elevation(elevtn):
     elevtn oderdered from up- to downstream
     """
     n = elevtn.size
-    zmin = elevtn[0]
-    zmax = elevtn[0]
-    valid = True
+    imax, imin = -1, -1
+    zmax, zmin = elevtn[0], elevtn[0]  # local max / min elevation
+    zi_min1, zi_min2 = zmin, zmin  # initialize
+    # all elevtn should be larger than last value
+    elevtn = np.maximum(elevtn, elevtn[-1])
     for i in range(elevtn.size):
         zi = elevtn[i]
-        if valid:
-            if zi <= zmin:  # sloping down. do nothing
-                zmin = zi
-            else:  # new pit: downstream z > upstream z
-                valid = False
-                zmax = zi
-                imax = i
-                imin = i - 1
-        if not valid:
-            if zi <= zmin or i + 1 == elevtn.size:  # end of pit area: FIX
-                # option 1: dig -> zmod = zmin, for all values after pit
-                idxs = np.arange(imin, min(n, i + 1))
-                zmod = np.full(idxs.size, zmin, dtype=elevtn.dtype)
-                cost = np.sum(elevtn[idxs] - zmod)
-                if i + 1 == elevtn.size:
-                    # end of path but not of pit area
-                    elevtn[elevtn < zi] = zi  # fill all smaller than last value
-                    zmod = np.full(idxs.size, zi, dtype=elevtn.dtype)  # zmod == zi
-                elif (imax - imin) > 1:  # all options are equal when imax = imin + 1
-                    # option 2: fill -> zmod = zmax, for all values smaller than zmax, previous to zmax
-                    idxs2 = np.where(elevtn[:imax] <= zmax)[0]
-                    zmod2 = np.full(idxs2.size, zmax, dtype=elevtn.dtype)
-                    cost2 = np.sum(zmod2 - elevtn[idxs2])
+        if zi >= zmax:
+            zmax = zi
+            imax = i
+        if (zi > zi_min1 and zi_min2 >= zi_min1) or (imin >= 0 and i + 1 == n):  # pit
+            if imin >= 0:  # starting from second pit or end of vector
+                # option 1: dig -> zmod = zmin, for all values larger than zmin, after imin
+                idxs = np.arange(imin, i, dtype=np.uint32)
+                zmod = np.minimum(zmin, elevtn[idxs])
+                cost = np.sum(np.abs(elevtn[idxs] - zmod))
+                # option 2: fill -> zmod = zmax, for all values smaller than zmax, previous to imax
+                idxs2 = np.arange(0, imax, dtype=np.uint32)
+                zmod2 = np.maximum(zmax, elevtn[idxs2])
+                cost2 = np.sum(np.abs(elevtn[idxs2] - zmod2))
+                if cost2 < cost:
+                    cost, idxs, zmod = cost2, idxs2, zmod2
+                # option 3: dig & fill -> try all values between imin and imax
+                i0, j0, i1, j1 = 0, 0, imax, imax
+                zs = np.unique(elevtn[imin + 1 : i])[::-1]
+                for z in zs[1:]:  # skip zmax
+                    for j0 in range(i0, imin + 1):  # start of zmod
+                        if elevtn[j0] <= z:
+                            break
+                    for j1 in range(i1, i + 1):  # end of zmod
+                        if elevtn[j1] <= z:
+                            break
+                    i0, i1 = j0, j1
+                    idxs2 = np.arange(j0, max(imax + 1, j1), dtype=np.uint32)
+                    zmod2 = np.full(idxs2.size, z, dtype=elevtn.dtype)
+                    cost2 = np.sum(np.abs(elevtn[idxs2] - zmod2))
                     if cost2 < cost:
                         cost, idxs, zmod = cost2, idxs2, zmod2
-                    # option 3: dig and fill -> zmin < zmod < zmax
-                    idxs3 = np.where(
-                        np.logical_and(elevtn[:i] >= zmin, elevtn[:i] <= zmax)
-                    )[0]
-                    zorg = elevtn[idxs3]
-                    for z3 in np.unique(zorg):
-                        if z3 > zmin and z3 < zmax:
-                            zmod3 = np.full(idxs3.size, z3, dtype=elevtn.dtype)
-                            i0 = 0
-                            i1 = zorg.size - 1
-                            while zorg[i0] > z3:  # elevtn > z3 from start can remain
-                                zmod3[i0] = zorg[i0]
-                                i0 += 1
-                            while zorg[i1] < z3:  # elevtn < z3 from end can remain
-                                zmod3[i1] = zorg[i1]
-                                i1 -= 1
-                            cost3 = np.sum(np.abs(zmod3 - elevtn[idxs3]))
-                            if cost3 < cost:
-                                cost, idxs, zmod = cost3, idxs3, zmod3
-                # adjust elevtn
+                # update elevation
                 elevtn[idxs] = zmod
-                zmin = zi
-                valid = True
-            elif zi >= zmax:  # between zmin and zmax (slope up) # get last imax (!)
-                zmax = zi
-                imax = i
+            # update zmin & zmax
+            imax = i
+            zmax = elevtn[imax]
+            imin = max(0, i - 1)
+            zmin = elevtn[imin]
+        # update zi values
+        if zi_min2 != zi_min1:
+            zi_min2 = zi_min1
+        zi_min1 = zi
     return elevtn
 
 

@@ -24,12 +24,13 @@ def test_from_dem():
     )
     # NOTE: compared to paper same a_filled, but difference
     # in flowdir because row instead of col first ..
+    # and priority of non-boundary cells with same elevation
     d8 = np.array(
         [
             [2, 2, 4, 8, 1, 0, 16],
             [1, 1, 2, 2, 128, 64, 32],
             [128, 128, 1, 1, 2, 2, 4],
-            [64, 128, 128, 128, 1, 1, 0],
+            [128, 128, 128, 128, 1, 1, 0],
             [64, 128, 64, 32, 128, 128, 64],
         ],
         dtype=np.uint8,
@@ -69,11 +70,11 @@ def test_from_dem():
 
 
 def test_dem_adjust():
-    # # option 1 fill
+    # option 1 dig
     dem0 = np.array([8, 7, 6, 5, 5, 6, 5, 4])
     dem1 = np.array([8, 7, 6, 5, 5, 5, 5, 4])
     assert np.all(dem._adjust_elevation(dem0) == dem1)
-    # # option 2 fill
+    # option 2 fill
     dem0 = np.array([8, 7, 6, 5, 6, 6, 5, 4])
     dem1 = np.array([8, 7, 6, 6, 6, 6, 5, 4])
     assert np.all(dem._adjust_elevation(dem0) == dem1)
@@ -81,9 +82,23 @@ def test_dem_adjust():
     dem0 = np.array([8, 7, 6, 5, 6, 7, 5, 4])
     dem1 = np.array([8, 7, 6, 6, 6, 6, 5, 4])
     assert np.all(dem._adjust_elevation(dem0) == dem1)
-    # with zmax on last position
-    dem0 = np.array([8, 7, 6, 6, 6, 6, 5, 6])
-    dem1 = np.array([8, 7, 6, 6, 6, 6, 6, 6])
+    dem0 = np.array([84, 19, 5, 26, 34, 4])
+    dem1 = np.array([84, 26, 26, 26, 26, 4])
+    assert np.all(dem._adjust_elevation(dem0) == dem1)
+    dem0 = np.array([46, 26, 5, 20, 23, 21, 5])
+    dem1 = np.array([46, 26, 21, 21, 21, 21, 5])
+    assert np.all(dem._adjust_elevation(dem0) == dem1)
+    # with large z on last position
+    dem0 = np.array([8, 7, 6, 6, 6, 6, 5, 7])
+    dem1 = np.array([8, 7, 7, 7, 7, 7, 7, 7])
+    assert np.all(dem._adjust_elevation(dem0) == dem1)
+    # pit at first value
+    dem0 = np.array([5, 41, 15])
+    dem1 = np.array([15, 15, 15])
+    assert np.all(dem._adjust_elevation(dem0) == dem1)
+    # multiple pits
+    dem0 = np.array([60, 13, 54, 37, 49, 27, 22, 19, 42, 33, 40, 36, 7, 32, 8, 8, 2, 1])
+    dem1 = np.array([60, 54, 54, 37, 37, 27, 22, 19, 19, 19, 19, 19, 8, 8, 8, 8, 2, 1])
     assert np.all(dem._adjust_elevation(dem0) == dem1)
 
 
